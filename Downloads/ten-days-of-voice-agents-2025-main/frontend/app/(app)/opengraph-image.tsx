@@ -1,220 +1,209 @@
-import { headers } from 'next/headers';
-import { ImageResponse } from 'next/og';
-import getImageSize from 'buffer-image-size';
-import mime from 'mime';
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { APP_CONFIG_DEFAULTS } from '@/app-config';
-import { getAppConfig } from '@/lib/utils';
+import { headers } from "next/headers";
+import { ImageResponse } from "next/og";
+import getImageSize from "buffer-image-size";
+import mime from "mime";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
-type Dimensions = {
-  width: number;
-  height: number;
-};
+import { APP_CONFIG_DEFAULTS } from "@/app-config";
+import { getAppConfig } from "@/lib/utils";
 
-type ImageData = {
-  base64: string;
-  dimensions: Dimensions;
-};
+export const alt = "Open Graph Image";
+export const size = { width: 1200, height: 628 };
+export const contentType = "image/png";
 
-// Image metadata
-export const alt = 'About Acme';
-export const size = {
-  width: 1200,
-  height: 628,
-};
+type Dimensions = { width: number; height: number };
+type ImageData = { base64: string; dimensions: Dimensions };
 
-function isRemoteFile(uri: string) {
-  return uri.startsWith('http');
-}
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
 
-function doesLocalFileExist(uri: string) {
-  return existsSync(join(process.cwd(), uri));
-}
+const isRemote = (uri: string) => uri.startsWith("http");
+const filePathExists = (uri: string) => existsSync(join(process.cwd(), uri));
 
-// LOCAL FILES MUST BE IN PUBLIC FOLDER
-async function loadFileData(filePath: string): Promise<ArrayBuffer> {
-  if (isRemoteFile(filePath)) {
-    const response = await fetch(filePath);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch ${filePath} - ${response.status} ${response.statusText}`);
-    }
-    return await response.arrayBuffer();
+async function loadFile(uri: string): Promise<ArrayBuffer> {
+  // Remote URL
+  if (isRemote(uri)) {
+    const res = await fetch(uri);
+    if (!res.ok) throw new Error(`Failed to fetch ${uri}`);
+    return res.arrayBuffer();
   }
 
-  // Try file system first (works in local development)
-  if (doesLocalFileExist(filePath)) {
-    const buffer = await readFile(join(process.cwd(), filePath));
-    return buffer.buffer.slice(
-      buffer.byteOffset,
-      buffer.byteOffset + buffer.byteLength
-    ) as ArrayBuffer;
+  // Local filesystem
+  if (filePathExists(uri)) {
+    const file = await readFile(join(process.cwd(), uri));
+    return file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
   }
 
-  // Fallback to fetching from public URL (works in production)
-  const publicFilePath = filePath.replace('public/', '');
-  const fontUrl = `https://${process.env.VERCEL_URL}/${publicFilePath}`;
-
-  const response = await fetch(fontUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${fontUrl} - ${response.status} ${response.statusText}`);
-  }
-
-  return await response.arrayBuffer();
+  // Production fallback (load from public CDN)
+  const publicUri = uri.replace("public/", "");
+  const url = `https://${process.env.VERCEL_URL}/${publicUri}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+  return res.arrayBuffer();
 }
 
-async function getImageData(uri: string, fallbackUri?: string): Promise<ImageData> {
+async function readImage(uri: string, fallback?: string): Promise<ImageData> {
   try {
-    const fileData = await loadFileData(uri);
-    const buffer = Buffer.from(fileData);
-    const mimeType = mime.getType(uri);
+    const data = await loadFile(uri);
+    const buffer = Buffer.from(data);
+    const type = mime.getType(uri);
 
     return {
-      base64: `data:${mimeType};base64,${buffer.toString('base64')}`,
+      base64: `data:${type};base64,${buffer.toString("base64")}`,
       dimensions: getImageSize(buffer),
     };
-  } catch (e) {
-    if (fallbackUri) {
-      return getImageData(fallbackUri, fallbackUri);
-    }
-    throw e;
+  } catch (err) {
+    if (fallback) return readImage(fallback);
+    throw err;
   }
 }
 
-function scaleImageSize(size: { width: number; height: number }, desiredHeight: number) {
-  const scale = desiredHeight / size.height;
-  return {
-    width: size.width * scale,
-    height: desiredHeight,
-  };
-}
+const scaleToHeight = (dim: Dimensions, h: number) => {
+  const scale = h / dim.height;
+  return { width: dim.width * scale, height: h };
+};
 
-function cleanPageTitle(appName: string) {
-  if (appName === APP_CONFIG_DEFAULTS.pageTitle) {
-    return 'Voice agent';
-  }
+const cleanTitle = (title: string) =>
+  title === APP_CONFIG_DEFAULTS.pageTitle ? "Voice Agent" : title;
 
-  return appName;
-}
+// -----------------------------------------------------------------------------
+// Image Generation
+// -----------------------------------------------------------------------------
 
-export const contentType = 'image/png';
-
-// Image generation
 export default async function Image() {
   const hdrs = await headers();
-  const appConfig = await getAppConfig(hdrs);
+  const config = await getAppConfig(hdrs);
 
-  const pageTitle = cleanPageTitle(appConfig.pageTitle);
-  const logoUri = appConfig.logoDark || appConfig.logo;
-  const isLogoUriLocal = logoUri.includes('lk-logo');
-  const wordmarkUri = logoUri === APP_CONFIG_DEFAULTS.logoDark ? 'public/lk-wordmark.svg' : logoUri;
+  const pageTitle = cleanTitle(config.pageTitle);
 
-  // Load fonts - use file system in dev, fetch in production
-  let commitMonoData: ArrayBuffer | undefined;
-  let everettLightData: ArrayBuffer | undefined;
+  // Logo / wordmark logic
+  const logoUri = config.logoDark || config.logo;
+  const isLocal = logoUri.includes("lk-logo");
+  const wordmarkUri = isLocal
+    ? "public/lk-wordmark.svg"
+    : logoUri;
+
+  // Load fonts
+  const fonts = [];
+  try {
+    const mono = await loadFile("public/commit-mono-400-regular.woff");
+    fonts.push({
+      name: "CommitMono",
+      data: mono,
+      style: "normal" as const,
+      weight: 400 as const,
+    });
+  } catch {}
 
   try {
-    commitMonoData = await loadFileData('public/commit-mono-400-regular.woff');
-    everettLightData = await loadFileData('public/everett-light.woff');
-  } catch (e) {
-    console.error('Failed to load fonts:', e);
-    // Continue without custom fonts - will fall back to system fonts
-  }
+    const everett = await loadFile("public/everett-light.woff");
+    fonts.push({
+      name: "Everett",
+      data: everett,
+      style: "normal" as const,
+      weight: 300 as const,
+    });
+  } catch {}
 
-  // bg
-  const { base64: bgSrcBase64 } = await getImageData('public/opengraph-image-bg.png');
+  // Background
+  const { base64: bg } = await readImage("public/opengraph-image-bg.png");
 
-  // wordmark
-  const { base64: wordmarkSrcBase64, dimensions: wordmarkDimensions } = isLogoUriLocal
-    ? await getImageData(wordmarkUri)
-    : await getImageData(logoUri);
-  const wordmarkSize = scaleImageSize(wordmarkDimensions, isLogoUriLocal ? 32 : 64);
+  // Wordmark
+  const {
+    base64: wordmark,
+    dimensions: wDims,
+  } = await readImage(wordmarkUri);
+  const wSize = scaleToHeight(wDims, isLocal ? 32 : 64);
 
-  // logo
-  const { base64: logoSrcBase64, dimensions: logoDimensions } = await getImageData(
-    logoUri,
-    'public/lk-logo-dark.svg'
-  );
-  const logoSize = scaleImageSize(logoDimensions, 24);
+  // Logo
+  const {
+    base64: logo,
+    dimensions: lDims,
+  } = await readImage(logoUri, "public/lk-logo-dark.svg");
+  const lSize = scaleToHeight(lDims, 24);
+
+  // ---------------------------------------------------------------------------
+  // Render OG Image
+  // ---------------------------------------------------------------------------
 
   return new ImageResponse(
     (
-      // ImageResponse JSX element
       <div
         style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
           width: size.width,
           height: size.height,
-          backgroundImage: `url(${bgSrcBase64})`,
-          backgroundSize: '100% 100%',
-          backgroundPosition: 'center',
-          backgroundRepeat: 'no-repeat',
+          backgroundImage: `url(${bg})`,
+          backgroundSize: "100% 100%",
+          backgroundPosition: "center",
         }}
       >
-        {/* wordmark */}
+        {/* Wordmark */}
         <div
           style={{
-            position: 'absolute',
+            position: "absolute",
             top: 30,
             left: 30,
-            display: 'flex',
-            alignItems: 'center',
+            display: "flex",
+            alignItems: "center",
             gap: 10,
           }}
         >
-          {/* eslint-disable-next-line jsx-a11y/alt-text */}
-          <img src={wordmarkSrcBase64} width={wordmarkSize.width} height={wordmarkSize.height} />
+          <img src={wordmark} width={wSize.width} height={wSize.height} />
         </div>
-        {/* logo */}
+
+        {/* Logo */}
         <div
           style={{
-            position: 'absolute',
+            position: "absolute",
             top: 200,
             left: 460,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
+            display: "flex",
+            alignItems: "center",
           }}
         >
-          {/* eslint-disable-next-line jsx-a11y/alt-text */}
-          <img src={logoSrcBase64} width={logoSize.width} height={logoSize.height} />
+          <img src={logo} width={lSize.width} height={lSize.height} />
         </div>
-        {/* title */}
+
+        {/* Title */}
         <div
           style={{
-            position: 'absolute',
+            position: "absolute",
             bottom: 100,
             left: 30,
-            width: '380px',
-            display: 'flex',
-            flexDirection: 'column',
+            width: 380,
+            display: "flex",
+            flexDirection: "column",
             gap: 16,
           }}
         >
           <div
             style={{
-              backgroundColor: '#1F1F1F',
-              padding: '2px 8px',
+              backgroundColor: "#1F1F1F",
+              padding: "2px 8px",
               borderRadius: 4,
               width: 72,
               fontSize: 12,
-              fontFamily: 'CommitMono',
+              fontFamily: "CommitMono",
               fontWeight: 600,
-              color: '#999999',
+              color: "#999",
               letterSpacing: 0.8,
             }}
           >
             SANDBOX
           </div>
+
           <div
             style={{
               fontSize: 48,
               fontWeight: 300,
-              fontFamily: 'Everett',
-              color: 'white',
+              fontFamily: "Everett",
+              color: "white",
               lineHeight: 1,
             }}
           >
@@ -223,33 +212,9 @@ export default async function Image() {
         </div>
       </div>
     ),
-    // ImageResponse options
     {
-      // For convenience, we can re-use the exported opengraph-image
-      // size config to also set the ImageResponse's width and height.
       ...size,
-      fonts: [
-        ...(commitMonoData
-          ? [
-              {
-                name: 'CommitMono',
-                data: commitMonoData,
-                style: 'normal' as const,
-                weight: 400 as const,
-              },
-            ]
-          : []),
-        ...(everettLightData
-          ? [
-              {
-                name: 'Everett',
-                data: everettLightData,
-                style: 'normal' as const,
-                weight: 300 as const,
-              },
-            ]
-          : []),
-      ],
+      fonts,
     }
   );
 }
